@@ -10,12 +10,16 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+from datetime import date
+
 from src.concentration_analysis import (
     POI_SENTINELS,
     concentration_summary,
     top_concentration,
 )
 from src.load_data import COLUMN_MAP, QUEUE_SHEET, find_data_file, load_queued_up
+from src.pjm_queue import list_snapshots, load_snapshot
+from src.pjm_scoring import score_pjm_active
 from src.withdrawal_model import score_open_queue, train
 
 st.set_page_config(
@@ -32,6 +36,20 @@ def _load() -> pd.DataFrame:
 @st.cache_resource(show_spinner="Training withdrawal model...")
 def _train(df: pd.DataFrame):
     return train(df)
+
+
+@st.cache_data(show_spinner="Loading latest PJM snapshot...")
+def _load_pjm():
+    snapshots = list_snapshots()
+    if not snapshots:
+        return None, None
+    latest = snapshots[-1]
+    return load_snapshot(latest), date.fromisoformat(latest.stem)
+
+
+@st.cache_data(show_spinner="Scoring PJM active queue...")
+def _score_pjm(_pjm_df, _lbnl_df):
+    return score_pjm_active(_pjm_df, _lbnl_df)
 
 
 try:
@@ -128,6 +146,105 @@ with st.expander("📂 How the data is being read (methodology)", expanded=False
         st.dataframe(mapping_df, use_container_width=True, hide_index=True, height=400)
 
 st.divider()
+
+# ───── Live PJM Queue Tracker ─────────────────────────────────────────────────
+pjm_df, snapshot_dt = _load_pjm()
+
+if pjm_df is not None:
+    st.header("Live tracker: PJM queue right now")
+    st.caption(
+        f"Snapshot taken **{snapshot_dt:%B %d, %Y}** directly from PJM's planning API. "
+        "PJM operates the largest U.S. RTO (67M people, 13 states + DC) and is Tapestry's "
+        "first deployment partner for HyperQ. Cycle 1 of PJM's reformed interconnection process "
+        "received 811 new projects (220 GW) on April 28, 2026 — that data is in PJM's 91-day "
+        "validation phase and not yet machine-readable. The numbers below cover the **transition cohort**: "
+        "projects already in PJM's queue working through the legacy → reformed handoff."
+    )
+
+    pjm_active = pjm_df[pjm_df["Status"] == "Active"]
+    pjm_inflight = pjm_df[pjm_df["Status"].isin(
+        ["Active", "Engineering and Procurement", "Confirmed", "Suspended", "Under Construction"]
+    )]
+    pjm_active_gw = pjm_active["MW Capacity"].fillna(pjm_active["MW Energy"]).sum() / 1000
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("Active in PJM queue", f"{len(pjm_active):,}")
+    p2.metric("Active capacity", f"{pjm_active_gw:,.0f} GW")
+    p3.metric(
+        "In-flight (all live phases)",
+        f"{len(pjm_inflight):,}",
+        help="Active + Engineering & Procurement + Confirmed + Suspended + Under Construction.",
+    )
+    p4.metric("Snapshot date", snapshot_dt.strftime("%Y-%m-%d"))
+
+    scored_pjm = _score_pjm(pjm_df, df)
+
+    pcol1, pcol2 = st.columns([3, 2])
+
+    with pcol1:
+        st.subheader("Highest withdrawal-risk active projects")
+        st.caption(
+            "Each active project scored with the LBNL-trained gradient-boosting model "
+            "(features: queue age, MW, resource type, RTO). Useful for spotting projects "
+            "that historically resemble withdrawn ones."
+        )
+        risk_view = (
+            scored_pjm.sort_values("p_withdraw", ascending=False)
+            .head(25)[["queue_id", "project_name", "State", "Fuel",
+                       "mw", "queue_age_years", "p_withdraw"]]
+            .rename(columns={
+                "queue_id": "Queue ID",
+                "project_name": "Project",
+                "Fuel": "Resource",
+                "mw": "MW",
+                "queue_age_years": "Age (yrs)",
+                "p_withdraw": "P(withdraw)",
+            })
+        )
+        st.dataframe(
+            risk_view.style.format(
+                {"MW": "{:,.0f}", "Age (yrs)": "{:.1f}", "P(withdraw)": "{:.0%}"}
+            ),
+            use_container_width=True,
+            hide_index=True,
+            height=380,
+        )
+
+    with pcol2:
+        st.subheader("Active queue composition")
+        fuel_counts = (
+            pjm_active.groupby("Fuel")
+            .agg(projects=("Project ID", "size"), total_mw=("MW Capacity", "sum"))
+            .reset_index()
+            .sort_values("projects", ascending=False)
+        )
+        fuel_counts["GW"] = (fuel_counts["total_mw"] / 1000).round(1)
+        fig = px.bar(
+            fuel_counts,
+            x="Fuel",
+            y="projects",
+            text="projects",
+            title="Active PJM projects by fuel type",
+            labels={"Fuel": "", "projects": "Active projects"},
+            height=380,
+        )
+        fig.update_traces(textposition="outside")
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Cycle 1 (reformed process)")
+    cyc1, cyc2, cyc3, cyc4 = st.columns(4)
+    cyc1.metric("Applications received", "811", help="As announced by PJM April 29, 2026.")
+    cyc2.metric("Total nameplate capacity", "220 GW")
+    cyc3.metric("Validation window", "Apr 28 – Jul 27 2026")
+    cyc4.metric("Phase I begins", "~ Jul 28 2026")
+    st.caption(
+        "Cycle 1 composition (per PJM): 349 storage · 157 gas · 142 solar · 65 wind · "
+        "45 solar+storage · 27 nuclear · 11 hydro · 15 other (incl. fusion). "
+        "Per-project data isn't published yet — the tracker scaffold is ready to ingest it "
+        "as soon as PJM exposes the new feed."
+    )
+
+    st.divider()
 
 # ───── Section 1: Concentration ───────────────────────────────────────────────
 full_summary = concentration_summary(df)
