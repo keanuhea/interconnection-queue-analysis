@@ -14,16 +14,22 @@ import pandas as pd
 
 from src.load_data import load_queued_up
 
+POI_SENTINELS = {"Other_", "Other", "Unknown", "TBD", "N/A", "NA", "None", "nan"}
+
 
 def concentration_summary(df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate queue load per POI and flag top-decile concentration."""
+    """Aggregate queue load per POI and flag top-decile concentration.
+
+    Sentinel/aggregation bins (e.g. "Other_", "Unknown") are excluded — they
+    represent unresolved data, not real bottleneck substations.
+    """
     if "poi" not in df.columns:
         raise KeyError(
-            "Expected a 'poi' column. Check load_data.CANONICAL_COLUMNS — "
+            "Expected a 'poi' column. Check load_data.COLUMN_MAP — "
             "your dataset's POI column may be named differently."
         )
 
-    open_df = df[df["withdrawn"] == 0].copy()
+    open_df = df[(df["withdrawn"] == 0) & (~df["poi"].isin(POI_SENTINELS))].copy()
     grouped = (
         open_df.groupby("poi", dropna=True)
         .agg(
