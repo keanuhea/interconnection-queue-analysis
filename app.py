@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from datetime import date
@@ -17,9 +18,17 @@ from src.concentration_analysis import (
     concentration_summary,
     top_concentration,
 )
+from src.forward_sim import simulate
 from src.load_data import COLUMN_MAP, QUEUE_SHEET, find_data_file, load_queued_up
 from src.pjm_queue import list_snapshots, load_snapshot
 from src.pjm_scoring import score_pjm_active
+from src.state_machine import (
+    ACTIVE_STATES,
+    CANONICAL_TRANSITIONS,
+    State,
+    cohort_from_lbnl,
+    fit_hazards,
+)
 from src.withdrawal_model import score_open_queue, train
 
 st.set_page_config(
@@ -50,6 +59,19 @@ def _load_pjm():
 @st.cache_data(show_spinner="Scoring PJM active queue...")
 def _score_pjm(_pjm_df, _lbnl_df):
     return score_pjm_active(_pjm_df, _lbnl_df)
+
+
+@st.cache_resource(show_spinner="Fitting transition hazards...")
+def _fit_hazards(_df):
+    return fit_hazards(_df)
+
+
+@st.cache_data(show_spinner="Running 500 forward simulations...")
+def _simulate(_df, horizon_years: int = 10, n_replicates: int = 500):
+    table = _fit_hazards(_df)
+    cohort = cohort_from_lbnl(_df, table.asof)
+    result = simulate(cohort, table, horizon_years=horizon_years, n_replicates=n_replicates)
+    return table, cohort, result
 
 
 try:
@@ -381,7 +403,162 @@ st.plotly_chart(fig, use_container_width=True)
 
 st.divider()
 
-# ───── Section 3: How we got here ─────────────────────────────────────────────
+# ───── Section 3: Forward simulation ──────────────────────────────────────────
+table, cohort, sim = _simulate(df, horizon_years=10, n_replicates=500)
+horizon_idx = len(sim.months) - 1
+horizon_dt = sim.months[-1]
+
+initial_gw = cohort["mw"].fillna(0).sum() / 1000
+op_gw_p50 = float(sim.operational_gw_quantiles((0.5,)).iloc[-1, 0])
+op_gw_p10 = float(sim.operational_gw_quantiles((0.1,)).iloc[-1, 0])
+op_gw_p90 = float(sim.operational_gw_quantiles((0.9,)).iloc[-1, 0])
+
+horizon_states = sim.state_at_horizon(horizon_idx)
+expected_op = float(horizon_states.loc["operational", "mean"])
+expected_wd = float(horizon_states.loc["withdrawn", "mean"])
+expected_stuck = float(
+    horizon_states.loc[[s.value for s in ACTIVE_STATES], "mean"].sum()
+)
+n_cohort = len(cohort)
+
+st.header(
+    f"If history repeats: only {expected_op / n_cohort:.0%} of today's queue reaches the grid by {horizon_dt.year}"
+)
+st.markdown(
+    f"Starting from **{n_cohort:,} active LBNL projects ({initial_gw:,.0f} GW)** and rolling forward "
+    "ten years using empirically-fit monthly transition hazards, the simulation runs **500 Monte Carlo "
+    "replicates**. Each replicate samples a possible future for every project independently, given its "
+    "current milestone state. The fan chart below shows the resulting distribution of operational GW "
+    "over time — the spread is queue-progression uncertainty, not measurement noise."
+)
+
+s1, s2, s3, s4 = st.columns(4)
+s1.metric(
+    f"Projects operational by {horizon_dt.year}",
+    f"{expected_op:,.0f}",
+    help=f"Mean across 500 replicates. P10–P90: "
+         f"{horizon_states.loc['operational', 'p10']:,.0f} – "
+         f"{horizon_states.loc['operational', 'p90']:,.0f}.",
+)
+s2.metric(
+    "Expected operational GW",
+    f"{op_gw_p50:,.0f} GW",
+    help=f"Median (P50). P10: {op_gw_p10:,.0f} GW · P90: {op_gw_p90:,.0f} GW.",
+)
+s3.metric(
+    f"Projected withdrawals by {horizon_dt.year}",
+    f"{expected_wd:,.0f}",
+    help=f"Mean across replicates. P10–P90: "
+         f"{horizon_states.loc['withdrawn', 'p10']:,.0f} – "
+         f"{horizon_states.loc['withdrawn', 'p90']:,.0f}.",
+)
+s4.metric(
+    "Still in queue at horizon",
+    f"{expected_stuck:,.0f}",
+    help="Projects that have neither reached commercial operation nor withdrawn after ten years.",
+)
+
+# Fan chart: operational GW over time
+quantiles = sim.operational_gw_quantiles((0.1, 0.5, 0.9))
+fan_df = quantiles.reset_index().rename(columns={"month": "date"})
+
+fig = go.Figure()
+fig.add_trace(
+    go.Scatter(
+        x=fan_df["date"], y=fan_df["p90"], line=dict(width=0),
+        showlegend=False, hoverinfo="skip", name="P90",
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=fan_df["date"], y=fan_df["p10"], line=dict(width=0),
+        fill="tonexty", fillcolor="rgba(99, 110, 250, 0.20)",
+        name="P10–P90 envelope", hoverinfo="skip",
+    )
+)
+fig.add_trace(
+    go.Scatter(
+        x=fan_df["date"], y=fan_df["p50"],
+        line=dict(color="rgb(99, 110, 250)", width=3),
+        name="Median (P50)",
+        hovertemplate="%{x|%b %Y}: %{y:,.0f} GW operational<extra></extra>",
+    )
+)
+fig.update_layout(
+    title=f"Operational GW from today's active cohort, {horizon_dt.year - 10} → {horizon_dt.year}",
+    xaxis_title="",
+    yaxis_title="Operational GW (cumulative)",
+    height=400,
+    hovermode="x unified",
+)
+st.plotly_chart(fig, use_container_width=True)
+
+# Stacked area: state composition over time
+share_df = sim.state_share_mean().reset_index().melt(
+    id_vars="month", var_name="state", value_name="projects"
+)
+state_order = ["submitted", "ia_signed", "operational", "withdrawn"]
+share_df["state"] = pd.Categorical(share_df["state"], categories=state_order, ordered=True)
+share_df = share_df.sort_values(["month", "state"])
+
+fig = px.area(
+    share_df,
+    x="month",
+    y="projects",
+    color="state",
+    title="Where the cohort goes: average project counts by state over time",
+    labels={"month": "", "projects": "Projects (mean across replicates)", "state": "State"},
+    category_orders={"state": state_order},
+    color_discrete_map={
+        "submitted": "#aaa",
+        "ia_signed": "#7e9bff",
+        "operational": "#3ec47e",
+        "withdrawn": "#e85d75",
+    },
+)
+fig.update_layout(height=380)
+st.plotly_chart(fig, use_container_width=True)
+
+with st.expander("📐 How the simulation is fit (methodology)", expanded=False):
+    st.markdown(
+        "**Model.** Continuous-time Markov chain over four states "
+        "(`submitted`, `ia_signed`, `operational`, `withdrawn`), discretized at monthly "
+        "resolution. Each active project independently samples a transition each month "
+        "from a categorical distribution. Hazards are piecewise-constant — the simplest "
+        "defensible model given LBNL only records milestone *dates*, not per-month status."
+    )
+    st.markdown(
+        f"**Calibration window.** All LBNL projects entering the queue 2010-01-01 through "
+        f"{table.asof.date()}, exposure-weighted. Older entries are excluded because LBNL "
+        "carries some pre-2003 sentinel records."
+    )
+    st.markdown("**Empirical monthly hazards** (per active state):")
+    rows = []
+    for tr in CANONICAL_TRANSITIONS:
+        p_m = table.monthly_p[tr.from_state][tr.to_state]
+        p_y = 1 - (1 - p_m) ** 12
+        n = table.n_observed[tr.from_state][tr.to_state]
+        rows.append({
+            "From": tr.from_state.value,
+            "To": tr.to_state.value,
+            "Monthly P": f"{p_m:.4f}",
+            "Annualized P": f"{p_y:.1%}",
+            "n observed": f"{n:,}",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.caption(
+        "**Caveats.** (1) Hazards are pooled across RTO and resource type; the next "
+        "iteration will fit per (state × RTO × resource). "
+        "(2) Right-censored projects contribute to exposure but not to transition counts — "
+        "the standard treatment, but it underweights the actual risk of older lingering projects. "
+        "(3) The model assumes hazards are stationary; FERC Order 2023's reformed cluster "
+        "process is *not* yet visible in the calibration data, so the baseline projects forward "
+        "from pre-reform dynamics. The what-if layer (next) lets you explore scenarios where it isn't."
+    )
+
+st.divider()
+
+# ───── Section 4: How we got here ─────────────────────────────────────────────
 st.header("How we got here: queue growth has accelerated since 2018")
 
 if "queue_date" in df.columns and "rto" in df.columns:
