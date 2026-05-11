@@ -31,7 +31,7 @@ COLUMN_MAP = {
     "poi_name": "poi",
     "project_name": "project_name",
     "type_clean": "resource_type",
-    "mw1": "mw",
+    "mw_1": "mw",
     "county": "county",
     "state": "state",
     "service": "service",
@@ -55,9 +55,18 @@ def find_data_file() -> Path:
     return candidates[0]
 
 
-def _parse_excel_serial(s: pd.Series) -> pd.Series:
-    numeric = pd.to_numeric(s, errors="coerce")
-    return pd.to_datetime(numeric, unit="D", origin=EXCEL_EPOCH, errors="coerce")
+def _parse_date_column(s: pd.Series) -> pd.Series:
+    """Parse a column that may be either Excel-serial floats or already-datetime.
+
+    openpyxl auto-parses Excel cells with date formatting into datetime64; older
+    or text-formatted exports come through as numeric serials counted from
+    1899-12-30. Handle both.
+    """
+    if pd.api.types.is_datetime64_any_dtype(s):
+        return s
+    if pd.api.types.is_numeric_dtype(s):
+        return pd.to_datetime(s, unit="D", origin=EXCEL_EPOCH, errors="coerce")
+    return pd.to_datetime(s, errors="coerce")
 
 
 def load_queued_up(xlsx_path: Path | None = None) -> pd.DataFrame:
@@ -72,7 +81,7 @@ def load_queued_up(xlsx_path: Path | None = None) -> pd.DataFrame:
 
     for col in DATE_COLUMNS:
         if col in df.columns:
-            df[col] = _parse_excel_serial(df[col])
+            df[col] = _parse_date_column(df[col])
 
     if "mw" in df.columns:
         df["mw"] = pd.to_numeric(df["mw"], errors="coerce")
