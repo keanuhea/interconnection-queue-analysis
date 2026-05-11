@@ -197,14 +197,21 @@ def fit_hazards(
 
 
 def cohort_from_lbnl(df: pd.DataFrame, asof: pd.Timestamp) -> pd.DataFrame:
-    """Snapshot: every still-active LBNL project with its current state."""
+    """Snapshot: every still-active LBNL project with its current state.
+
+    The `state` column stores the string `.value` (not the State enum). This
+    avoids dtype-downcast surprises when the DataFrame is round-tripped through
+    streamlit's Arrow-backed cache, which strips Enum identity from `str+Enum`
+    subclasses. Use State(row["state"]) to recover the enum when needed.
+    """
     snap = df.copy()
-    snap["state"] = snap.apply(lambda r: derive_current_state(r, asof), axis=1)
-    snap["state_value"] = snap["state"].map(lambda s: s.value)
+    snap["state"] = snap.apply(lambda r: derive_current_state(r, asof).value, axis=1)
+    snap["state_value"] = snap["state"]
     snap["months_in_state"] = snap.apply(
-        lambda r: _months_in_state(r, r["state"], asof), axis=1
+        lambda r: _months_in_state(r, State(r["state"]), asof), axis=1
     )
-    active = snap[snap["state"].isin(list(ACTIVE_STATES))].copy()
+    active_values = [s.value for s in ACTIVE_STATES]
+    active = snap[snap["state"].isin(active_values)].copy()
     return active
 
 
