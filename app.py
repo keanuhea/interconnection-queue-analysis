@@ -74,6 +74,37 @@ def _simulate(_df, horizon_years: int = 10, n_replicates: int = 500):
     return table, cohort, result
 
 
+@st.cache_data(show_spinner="Running scenario simulation...")
+def _scenario(
+    _df,
+    study_speed: float,
+    withdrawal_strict: float,
+    build_speed: float,
+    horizon_years: int = 10,
+    n_replicates: int = 250,
+):
+    """Run the multi-state sim with operator-side lever multipliers applied.
+
+    Three levers map onto four transitions (withdrawal lever scales both
+    `→ withdrawn` paths). Returns a SimResult keyed by the slider values so
+    the cache reuses identical lever combinations across reruns.
+    """
+    table = _fit_hazards(_df)
+    cohort = cohort_from_lbnl(_df, table.asof)
+    multipliers = {
+        (State.SUBMITTED, State.IA_SIGNED): study_speed,
+        (State.SUBMITTED, State.WITHDRAWN): withdrawal_strict,
+        (State.IA_SIGNED, State.OPERATIONAL): build_speed,
+        (State.IA_SIGNED, State.WITHDRAWN): withdrawal_strict,
+    }
+    return simulate(
+        cohort, table,
+        horizon_years=horizon_years,
+        n_replicates=n_replicates,
+        scenario_multipliers=multipliers,
+    )
+
+
 try:
     df = _load()
 except FileNotFoundError as e:
@@ -430,37 +461,99 @@ st.markdown(
     f"Starting from **{n_cohort:,} active LBNL projects ({initial_gw:,.0f} GW)** and rolling forward "
     "ten years using empirically-fit monthly transition hazards, the simulation runs **500 Monte Carlo "
     "replicates**. Each replicate samples a possible future for every project independently, given its "
-    "current milestone state. The fan chart below shows the resulting distribution of operational GW "
-    "over time — the spread is queue-progression uncertainty, not measurement noise."
+    "current milestone state. **Pull the levers below** to see how operator-side policy changes shift the cohort."
 )
+
+# ── Operator-side lever panel ────────────────────────────────────────────────
+for key, default in (("study_speed", 1.0), ("withdrawal_strict", 1.0), ("build_speed", 1.0)):
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+lv1, lv2, lv3, lv_reset = st.columns([3, 3, 3, 1])
+with lv1:
+    study_speed = st.slider(
+        "Cluster study throughput",
+        0.5, 2.0, key="study_speed", step=0.1,
+        help="Multiplier on submitted → IA signed. 1.5× simulates FERC Order 2023's "
+             "reformed cluster process completing studies ~50% faster.",
+    )
+with lv2:
+    withdrawal_strict = st.slider(
+        "Withdrawal trigger strictness",
+        0.5, 2.0, key="withdrawal_strict", step=0.1,
+        help="Multiplier on both withdrawal transitions. >1 = stricter financial "
+             "milestones (more projects drop out); <1 = looser regime, more projects linger.",
+    )
+with lv3:
+    build_speed = st.slider(
+        "Construction throughput",
+        0.5, 2.0, key="build_speed", step=0.1,
+        help="Multiplier on IA signed → operational. Captures supply-chain, "
+             "permitting, and labor constraints downstream of interconnection approval.",
+    )
+with lv_reset:
+    st.markdown("&nbsp;")
+    if st.button("↺ Reset", help="Return all levers to baseline (1.0×)."):
+        st.session_state.study_speed = 1.0
+        st.session_state.withdrawal_strict = 1.0
+        st.session_state.build_speed = 1.0
+        st.rerun()
+
+is_scenario = not (study_speed == 1.0 and withdrawal_strict == 1.0 and build_speed == 1.0)
+scenario_sim = (
+    _scenario(df, study_speed, withdrawal_strict, build_speed) if is_scenario else None
+)
+
+# Scenario aggregates for delta display
+if scenario_sim is not None:
+    sc_horizon = scenario_sim.state_at_horizon(len(scenario_sim.months) - 1)
+    sc_op = float(sc_horizon.loc["operational", "mean"])
+    sc_wd = float(sc_horizon.loc["withdrawn", "mean"])
+    sc_stuck = float(sc_horizon.loc[[s.value for s in ACTIVE_STATES], "mean"].sum())
+    sc_gw = float(scenario_sim.operational_gw_quantiles((0.5,)).iloc[-1, 0])
+
+    delta_op = f"{sc_op - expected_op:+,.0f}"
+    delta_gw = f"{sc_gw - op_gw_p50:+,.0f} GW"
+    delta_wd = f"{sc_wd - expected_wd:+,.0f}"
+    delta_stuck = f"{sc_stuck - expected_stuck:+,.0f}"
+else:
+    sc_op = sc_wd = sc_stuck = sc_gw = None
+    delta_op = delta_gw = delta_wd = delta_stuck = None
 
 s1, s2, s3, s4 = st.columns(4)
 s1.metric(
     f"Projects operational by {horizon_dt.year}",
-    f"{expected_op:,.0f}",
-    help=f"Mean across 500 replicates. P10–P90: "
-         f"{horizon_states.loc['operational', 'p10']:,.0f} – "
-         f"{horizon_states.loc['operational', 'p90']:,.0f}.",
+    f"{sc_op if is_scenario else expected_op:,.0f}",
+    delta=delta_op,
+    help=f"Baseline mean: {expected_op:,.0f} "
+         f"(P10–P90 {horizon_states.loc['operational', 'p10']:,.0f}–"
+         f"{horizon_states.loc['operational', 'p90']:,.0f}).",
 )
 s2.metric(
     "Expected operational GW",
-    f"{op_gw_p50:,.0f} GW",
-    help=f"Median (P50). P10: {op_gw_p10:,.0f} GW · P90: {op_gw_p90:,.0f} GW.",
+    f"{sc_gw if is_scenario else op_gw_p50:,.0f} GW",
+    delta=delta_gw,
+    help=f"Baseline median: {op_gw_p50:,.0f} GW "
+         f"(P10 {op_gw_p10:,.0f} · P90 {op_gw_p90:,.0f}).",
 )
 s3.metric(
     f"Projected withdrawals by {horizon_dt.year}",
-    f"{expected_wd:,.0f}",
-    help=f"Mean across replicates. P10–P90: "
-         f"{horizon_states.loc['withdrawn', 'p10']:,.0f} – "
-         f"{horizon_states.loc['withdrawn', 'p90']:,.0f}.",
+    f"{sc_wd if is_scenario else expected_wd:,.0f}",
+    delta=delta_wd,
+    delta_color="inverse",
+    help=f"Baseline mean: {expected_wd:,.0f} "
+         f"(P10–P90 {horizon_states.loc['withdrawn', 'p10']:,.0f}–"
+         f"{horizon_states.loc['withdrawn', 'p90']:,.0f}).",
 )
 s4.metric(
     "Still in queue at horizon",
-    f"{expected_stuck:,.0f}",
+    f"{sc_stuck if is_scenario else expected_stuck:,.0f}",
+    delta=delta_stuck,
+    delta_color="inverse",
     help="Projects that have neither reached commercial operation nor withdrawn after ten years.",
 )
 
-# Fan chart: operational GW over time
+# Fan chart: operational GW over time (baseline always; scenario overlay if active)
 quantiles = sim.operational_gw_quantiles((0.1, 0.5, 0.9))
 fan_df = quantiles.reset_index().rename(columns={"month": "date"})
 
@@ -468,26 +561,56 @@ fig = go.Figure()
 fig.add_trace(
     go.Scatter(
         x=fan_df["date"], y=fan_df["p90"], line=dict(width=0),
-        showlegend=False, hoverinfo="skip", name="P90",
+        showlegend=False, hoverinfo="skip", name="Baseline P90",
     )
 )
 fig.add_trace(
     go.Scatter(
         x=fan_df["date"], y=fan_df["p10"], line=dict(width=0),
-        fill="tonexty", fillcolor="rgba(99, 110, 250, 0.20)",
-        name="P10–P90 envelope", hoverinfo="skip",
+        fill="tonexty", fillcolor="rgba(150, 150, 150, 0.20)",
+        name="Baseline P10–P90", hoverinfo="skip",
     )
 )
+baseline_color = "rgb(150, 150, 150)" if is_scenario else "rgb(99, 110, 250)"
+baseline_dash = "dash" if is_scenario else "solid"
 fig.add_trace(
     go.Scatter(
         x=fan_df["date"], y=fan_df["p50"],
-        line=dict(color="rgb(99, 110, 250)", width=3),
-        name="Median (P50)",
-        hovertemplate="%{x|%b %Y}: %{y:,.0f} GW operational<extra></extra>",
+        line=dict(color=baseline_color, width=2, dash=baseline_dash),
+        name="Baseline (P50)",
+        hovertemplate="Baseline · %{x|%b %Y}: %{y:,.0f} GW<extra></extra>",
     )
 )
+
+if scenario_sim is not None:
+    sc_q = scenario_sim.operational_gw_quantiles((0.1, 0.5, 0.9)).reset_index().rename(
+        columns={"month": "date"}
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=sc_q["date"], y=sc_q["p90"], line=dict(width=0),
+            showlegend=False, hoverinfo="skip", name="Scenario P90",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=sc_q["date"], y=sc_q["p10"], line=dict(width=0),
+            fill="tonexty", fillcolor="rgba(62, 196, 126, 0.18)",
+            name="Scenario P10–P90", hoverinfo="skip",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=sc_q["date"], y=sc_q["p50"],
+            line=dict(color="rgb(62, 196, 126)", width=3),
+            name="Scenario (P50)",
+            hovertemplate="Scenario · %{x|%b %Y}: %{y:,.0f} GW<extra></extra>",
+        )
+    )
+
 fig.update_layout(
-    title=f"Operational GW from today's active cohort, {horizon_dt.year - 10} → {horizon_dt.year}",
+    title=("Operational GW: scenario vs. baseline" if is_scenario
+           else f"Operational GW from today's active cohort, {horizon_dt.year - 10} → {horizon_dt.year}"),
     xaxis_title="",
     yaxis_title="Operational GW (cumulative)",
     height=400,
@@ -495,8 +618,9 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True)
 
-# Stacked area: state composition over time
-share_df = sim.state_share_mean().reset_index().melt(
+# Stacked area: state composition over time (shows whichever view is active)
+active_sim = scenario_sim if scenario_sim is not None else sim
+share_df = active_sim.state_share_mean().reset_index().melt(
     id_vars="month", var_name="state", value_name="projects"
 )
 state_order = ["submitted", "ia_signed", "operational", "withdrawn"]
@@ -508,7 +632,8 @@ fig = px.area(
     x="month",
     y="projects",
     color="state",
-    title="Where the cohort goes: average project counts by state over time",
+    title=("Cohort flow under your scenario" if is_scenario
+           else "Where the cohort goes: average project counts by state over time"),
     labels={"month": "", "projects": "Projects (mean across replicates)", "state": "State"},
     category_orders={"state": state_order},
     color_discrete_map={
