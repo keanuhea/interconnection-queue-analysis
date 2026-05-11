@@ -90,10 +90,12 @@ def load_queued_up(xlsx_path: Path | None = None) -> pd.DataFrame:
     df["operational"] = _derive_operational(df)
 
     if "queue_date" in df.columns:
-        ref = pd.Timestamp("2024-12-31")
+        latest = df["queue_date"].max()
+        ref = pd.Timestamp(latest.year, 12, 31) if pd.notna(latest) else pd.Timestamp.today()
         df["queue_age_years"] = (
             (ref - df["queue_date"]).dt.days / 365.25
         ).round(2)
+        df.attrs["reference_date"] = ref
 
     return df
 

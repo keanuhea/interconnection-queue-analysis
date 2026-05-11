@@ -354,8 +354,10 @@ with mcol2:
     st.subheader("Which active projects are most at risk?")
     scored = score_open_queue(df, clf, encoder)
     if not scored.empty:
+        named = scored[scored["project_name"].notna()].copy()
+        named = named[named["queue_age_years"] >= 0]
         view = (
-            scored[
+            named[
                 ["project_name", "rto", "resource_type", "mw",
                  "queue_age_years", "p_withdraw"]
             ]
