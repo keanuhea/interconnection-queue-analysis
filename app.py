@@ -465,38 +465,136 @@ st.markdown(
 )
 
 # ── Operator-side lever panel ────────────────────────────────────────────────
+def _hazard_readout(table, study, strict, build):
+    """Translate monthly hazards + lever multipliers into plain-English summary stats.
+
+    Returns mean time-in-state and exit-share metrics so the slider captions can
+    show 'baseline 4.2 yrs → scenario 2.8 yrs' alongside the multiplier itself.
+    """
+    h_ia = table.monthly_p[State.SUBMITTED][State.IA_SIGNED] * study
+    h_wd_s = table.monthly_p[State.SUBMITTED][State.WITHDRAWN] * strict
+    h_op = table.monthly_p[State.IA_SIGNED][State.OPERATIONAL] * build
+    h_wd_i = table.monthly_p[State.IA_SIGNED][State.WITHDRAWN] * strict
+
+    sub_total = h_ia + h_wd_s
+    ia_total = h_op + h_wd_i
+
+    sub_years = (1 / sub_total) / 12 if sub_total > 0 else float("inf")
+    ia_years = (1 / ia_total) / 12 if ia_total > 0 else float("inf")
+    p_advance_sub = h_ia / sub_total if sub_total > 0 else 0
+    p_advance_ia = h_op / ia_total if ia_total > 0 else 0
+    overall_op_pct = p_advance_sub * p_advance_ia * 100
+    overall_wd_pct = 100 - overall_op_pct
+
+    return {
+        "sub_years": sub_years,
+        "ia_years": ia_years,
+        "overall_op_pct": overall_op_pct,
+        "overall_wd_pct": overall_wd_pct,
+    }
+
+
+def _apply_preset(study, strict, build):
+    st.session_state.study_speed = study
+    st.session_state.withdrawal_strict = strict
+    st.session_state.build_speed = build
+
+
 for key, default in (("study_speed", 1.0), ("withdrawal_strict", 1.0), ("build_speed", 1.0)):
     if key not in st.session_state:
         st.session_state[key] = default
 
+st.markdown("##### Try a named scenario, or drag the levers yourself")
+p1, p2, p3, p4, p5 = st.columns(5)
+if p1.button("Status quo", use_container_width=True,
+             help="All levers at 1.0× — extrapolates the last decade forward."):
+    _apply_preset(1.0, 1.0, 1.0)
+    st.rerun()
+if p2.button("Reform delivers", use_container_width=True,
+             help="FERC Order 2023's cluster-study reform works: faster approvals, "
+                  "stricter financial milestones cut speculative projects."):
+    _apply_preset(1.5, 1.3, 1.0)
+    st.rerun()
+if p3.button("Construction crunch", use_container_width=True,
+             help="Supply chain, transformer shortage, and labor squeeze slow projects "
+                  "downstream of approval; developers hold positions instead of dropping out."):
+    _apply_preset(1.0, 0.8, 0.6)
+    st.rerun()
+if p4.button("Reform stalls", use_container_width=True,
+             help="Order 2023 doesn't deliver: studies still slow, withdrawal incentives "
+                  "weak, construction roughly flat."):
+    _apply_preset(0.8, 0.9, 1.0)
+    st.rerun()
+if p5.button("All systems go", use_container_width=True,
+             help="Best-case 2030: faster studies, decisive withdrawals, "
+                  "supply chain healed."):
+    _apply_preset(1.6, 1.3, 1.4)
+    st.rerun()
+
+st.markdown(" ")
+
+# Compute baseline + scenario readouts so each slider can show its real-world effect
+base_read = _hazard_readout(table, 1.0, 1.0, 1.0)
+sc_read = _hazard_readout(
+    table,
+    st.session_state.study_speed,
+    st.session_state.withdrawal_strict,
+    st.session_state.build_speed,
+)
+
 lv1, lv2, lv3, lv_reset = st.columns([3, 3, 3, 1])
+
 with lv1:
     study_speed = st.slider(
-        "Cluster study throughput",
+        "How fast can RTOs approve a new project?",
         0.5, 2.0, key="study_speed", step=0.1,
-        help="Multiplier on submitted → IA signed. 1.5× simulates FERC Order 2023's "
-             "reformed cluster process completing studies ~50% faster.",
+        help="The cluster-study process — feasibility, system impact, facilities — "
+             "is the regulatory bottleneck most reformers target. 1.5× is roughly "
+             "what FERC Order 2023 was designed to achieve.",
     )
+    st.markdown(
+        f"<small>Avg time from queue entry to approval: "
+        f"<b>{base_read['sub_years']:.1f} yrs</b> today → "
+        f"<b style='color:#3ec47e'>{sc_read['sub_years']:.1f} yrs</b> scenario</small>",
+        unsafe_allow_html=True,
+    )
+
 with lv2:
     withdrawal_strict = st.slider(
-        "Withdrawal trigger strictness",
+        "How aggressively are speculative projects culled?",
         0.5, 2.0, key="withdrawal_strict", step=0.1,
-        help="Multiplier on both withdrawal transitions. >1 = stricter financial "
-             "milestones (more projects drop out); <1 = looser regime, more projects linger.",
+        help="Stricter financial milestones (deposits, ready-by deadlines) force "
+             "speculative projects to drop out faster. 1.5× simulates the queue-reform "
+             "intent: more withdrawals near-term, cleaner queue long-term. 0.7× is the "
+             "opposite — projects park indefinitely.",
     )
+    st.markdown(
+        f"<small>Share of new projects that ever reach the grid: "
+        f"<b>{base_read['overall_op_pct']:.0f}%</b> today → "
+        f"<b style='color:#3ec47e'>{sc_read['overall_op_pct']:.0f}%</b> scenario</small>",
+        unsafe_allow_html=True,
+    )
+
 with lv3:
     build_speed = st.slider(
-        "Construction throughput",
+        "How fast does construction actually finish?",
         0.5, 2.0, key="build_speed", step=0.1,
-        help="Multiplier on IA signed → operational. Captures supply-chain, "
-             "permitting, and labor constraints downstream of interconnection approval.",
+        help="Once a project has an interconnection agreement, can it actually get "
+             "built? Captures transformer lead times, IRA tax-credit certainty, labor, "
+             "and local permitting. 0.6× simulates the 2022–24 transformer shortage; "
+             "1.4× simulates a healed supply chain.",
     )
+    st.markdown(
+        f"<small>Avg time from approval to operating: "
+        f"<b>{base_read['ia_years']:.1f} yrs</b> today → "
+        f"<b style='color:#3ec47e'>{sc_read['ia_years']:.1f} yrs</b> scenario</small>",
+        unsafe_allow_html=True,
+    )
+
 with lv_reset:
     st.markdown("&nbsp;")
     if st.button("↺ Reset", help="Return all levers to baseline (1.0×)."):
-        st.session_state.study_speed = 1.0
-        st.session_state.withdrawal_strict = 1.0
-        st.session_state.build_speed = 1.0
+        _apply_preset(1.0, 1.0, 1.0)
         st.rerun()
 
 is_scenario = not (study_speed == 1.0 and withdrawal_strict == 1.0 and build_speed == 1.0)
