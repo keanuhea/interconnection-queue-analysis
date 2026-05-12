@@ -494,63 +494,63 @@ def _hazard_readout(table, study, strict, build):
     }
 
 
-def _apply_preset(study, strict, build):
-    st.session_state.study_speed = study
-    st.session_state.withdrawal_strict = strict
-    st.session_state.build_speed = build
+def _apply_preset(study_pct, strict_pct, build_pct):
+    st.session_state.study_pct = study_pct
+    st.session_state.withdrawal_strict_pct = strict_pct
+    st.session_state.build_pct = build_pct
 
 
-for key, default in (("study_speed", 1.0), ("withdrawal_strict", 1.0), ("build_speed", 1.0)):
+for key, default in (("study_pct", 0), ("withdrawal_strict_pct", 0), ("build_pct", 0)):
     if key not in st.session_state:
         st.session_state[key] = default
 
 st.markdown("##### Try a named scenario, or drag the levers yourself")
 p1, p2, p3, p4, p5 = st.columns(5)
 if p1.button("Status quo", use_container_width=True,
-             help="All levers at 1.0× — extrapolates the last decade forward."):
-    _apply_preset(1.0, 1.0, 1.0)
+             help="Everything at today's pace — extrapolates the last decade forward."):
+    _apply_preset(0, 0, 0)
     st.rerun()
 if p2.button("Reform delivers", use_container_width=True,
-             help="FERC Order 2023's cluster-study reform works: faster approvals, "
-                  "stricter financial milestones cut speculative projects."):
-    _apply_preset(1.5, 1.3, 1.0)
+             help="FERC Order 2023's cluster-study reform works: approvals 50% faster, "
+                  "30% more speculative projects culled."):
+    _apply_preset(50, 30, 0)
     st.rerun()
 if p3.button("Construction crunch", use_container_width=True,
-             help="Supply chain, transformer shortage, and labor squeeze slow projects "
-                  "downstream of approval; developers hold positions instead of dropping out."):
-    _apply_preset(1.0, 0.8, 0.6)
+             help="Supply chain, transformer shortage, and labor squeeze projects "
+                  "downstream of approval; construction 40% slower, developers hold "
+                  "positions instead of dropping out (20% less culling)."):
+    _apply_preset(0, -20, -40)
     st.rerun()
 if p4.button("Reform stalls", use_container_width=True,
-             help="Order 2023 doesn't deliver: studies still slow, withdrawal incentives "
-                  "weak, construction roughly flat."):
-    _apply_preset(0.8, 0.9, 1.0)
+             help="Order 2023 doesn't deliver: approvals 20% slower, withdrawal incentives "
+                  "10% weaker, construction roughly flat."):
+    _apply_preset(-20, -10, 0)
     st.rerun()
 if p5.button("All systems go", use_container_width=True,
-             help="Best-case 2030: faster studies, decisive withdrawals, "
-                  "supply chain healed."):
-    _apply_preset(1.6, 1.3, 1.4)
+             help="Best case 2030: approvals 60% faster, 30% more aggressive culling, "
+                  "construction 40% faster as supply chain heals."):
+    _apply_preset(60, 30, 40)
     st.rerun()
 
 st.markdown(" ")
 
-# Compute baseline + scenario readouts so each slider can show its real-world effect
+# Convert percent-change inputs into multipliers used by the simulator
+study_speed = 1 + st.session_state.study_pct / 100
+withdrawal_strict = 1 + st.session_state.withdrawal_strict_pct / 100
+build_speed = 1 + st.session_state.build_pct / 100
+
 base_read = _hazard_readout(table, 1.0, 1.0, 1.0)
-sc_read = _hazard_readout(
-    table,
-    st.session_state.study_speed,
-    st.session_state.withdrawal_strict,
-    st.session_state.build_speed,
-)
+sc_read = _hazard_readout(table, study_speed, withdrawal_strict, build_speed)
 
 lv1, lv2, lv3, lv_reset = st.columns([3, 3, 3, 1])
 
 with lv1:
-    study_speed = st.slider(
+    study_pct = st.slider(
         "How fast can RTOs approve a new project?",
-        0.5, 2.0, key="study_speed", step=0.1,
-        help="The cluster-study process — feasibility, system impact, facilities — "
-             "is the regulatory bottleneck most reformers target. 1.5× is roughly "
-             "what FERC Order 2023 was designed to achieve.",
+        -50, 100, key="study_pct", step=10, format="%+d%%",
+        help="0% = today's pace. The cluster-study process (feasibility, system "
+             "impact, facilities) is the regulatory bottleneck most reformers "
+             "target. +50% is roughly what FERC Order 2023 was designed to achieve.",
     )
     st.markdown(
         f"<small>Avg time from queue entry to approval: "
@@ -560,13 +560,13 @@ with lv1:
     )
 
 with lv2:
-    withdrawal_strict = st.slider(
+    withdrawal_strict_pct = st.slider(
         "How aggressively are speculative projects culled?",
-        0.5, 2.0, key="withdrawal_strict", step=0.1,
-        help="Stricter financial milestones (deposits, ready-by deadlines) force "
-             "speculative projects to drop out faster. 1.5× simulates the queue-reform "
-             "intent: more withdrawals near-term, cleaner queue long-term. 0.7× is the "
-             "opposite — projects park indefinitely.",
+        -50, 100, key="withdrawal_strict_pct", step=10, format="%+d%%",
+        help="0% = today's pace. Stricter financial milestones (deposits, ready-by "
+             "deadlines) force speculative projects to drop out faster. +50% simulates "
+             "queue-reform intent — more withdrawals near-term, cleaner queue long-term. "
+             "−30% means looser regime — projects park indefinitely.",
     )
     st.markdown(
         f"<small>Share of new projects that ever reach the grid: "
@@ -576,13 +576,13 @@ with lv2:
     )
 
 with lv3:
-    build_speed = st.slider(
+    build_pct = st.slider(
         "How fast does construction actually finish?",
-        0.5, 2.0, key="build_speed", step=0.1,
-        help="Once a project has an interconnection agreement, can it actually get "
-             "built? Captures transformer lead times, IRA tax-credit certainty, labor, "
-             "and local permitting. 0.6× simulates the 2022–24 transformer shortage; "
-             "1.4× simulates a healed supply chain.",
+        -50, 100, key="build_pct", step=10, format="%+d%%",
+        help="0% = today's pace. Once a project has an interconnection agreement, can "
+             "it actually get built? Captures transformer lead times, IRA tax-credit "
+             "certainty, labor, and local permitting. −40% simulates the 2022–24 "
+             "transformer shortage; +40% simulates a healed supply chain.",
     )
     st.markdown(
         f"<small>Avg time from approval to operating: "
@@ -593,11 +593,11 @@ with lv3:
 
 with lv_reset:
     st.markdown("&nbsp;")
-    if st.button("↺ Reset", help="Return all levers to baseline (1.0×)."):
-        _apply_preset(1.0, 1.0, 1.0)
+    if st.button("↺ Reset", help="Return all levers to today's pace (0%)."):
+        _apply_preset(0, 0, 0)
         st.rerun()
 
-is_scenario = not (study_speed == 1.0 and withdrawal_strict == 1.0 and build_speed == 1.0)
+is_scenario = not (study_pct == 0 and withdrawal_strict_pct == 0 and build_pct == 0)
 scenario_sim = (
     _scenario(df, study_speed, withdrawal_strict, build_speed) if is_scenario else None
 )
