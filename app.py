@@ -465,42 +465,91 @@ st.markdown(
 )
 
 # ── Operator-side lever panel ────────────────────────────────────────────────
-def _hazard_readout(table, study, strict, build):
-    """Translate monthly hazards + lever multipliers into plain-English summary stats.
+# Baseline display values come from the OBSERVED median durations among projects
+# that actually completed each transition — that's the "how long does a typical
+# project take" number an executive expects. The model-implied expected wait
+# (1 / total_hazard) folds in right-censored stuck projects and reads much
+# longer (6 yrs vs. 2 yrs); using it for the slider baseline would feel wrong.
+@st.cache_data(show_spinner=False)
+def _empirical_durations(_df):
+    queue_to_ia = _df[_df["ia_signed"].notna() & _df["queue_date"].notna()].copy()
+    queue_to_ia["yrs"] = (queue_to_ia["ia_signed"] - queue_to_ia["queue_date"]).dt.days / 365.25
+    queue_to_ia = queue_to_ia[queue_to_ia["yrs"] > 0]
 
-    Returns mean time-in-state and exit-share metrics so the slider captions can
-    show 'baseline 4.2 yrs → scenario 2.8 yrs' alongside the multiplier itself.
-    """
-    h_ia = table.monthly_p[State.SUBMITTED][State.IA_SIGNED] * study
-    h_wd_s = table.monthly_p[State.SUBMITTED][State.WITHDRAWN] * strict
-    h_op = table.monthly_p[State.IA_SIGNED][State.OPERATIONAL] * build
-    h_wd_i = table.monthly_p[State.IA_SIGNED][State.WITHDRAWN] * strict
+    ia_to_op = _df[_df["operational_date"].notna() & _df["ia_signed"].notna()].copy()
+    ia_to_op["yrs"] = (ia_to_op["operational_date"] - ia_to_op["ia_signed"]).dt.days / 365.25
+    ia_to_op = ia_to_op[ia_to_op["yrs"] > 0]
 
-    sub_total = h_ia + h_wd_s
-    ia_total = h_op + h_wd_i
-
-    sub_years = (1 / sub_total) / 12 if sub_total > 0 else float("inf")
-    ia_years = (1 / ia_total) / 12 if ia_total > 0 else float("inf")
-    p_advance_sub = h_ia / sub_total if sub_total > 0 else 0
-    p_advance_ia = h_op / ia_total if ia_total > 0 else 0
-    overall_op_pct = p_advance_sub * p_advance_ia * 100
-    overall_wd_pct = 100 - overall_op_pct
-
-    return {
-        "sub_years": sub_years,
-        "ia_years": ia_years,
-        "overall_op_pct": overall_op_pct,
-        "overall_wd_pct": overall_wd_pct,
-    }
+    return float(queue_to_ia["yrs"].median()), float(ia_to_op["yrs"].median())
 
 
-def _apply_preset(study_pct, strict_pct, build_pct):
-    st.session_state.study_pct = study_pct
-    st.session_state.withdrawal_strict_pct = strict_pct
-    st.session_state.build_pct = build_pct
+baseline_approval_yrs, baseline_construction_yrs = _empirical_durations(df)
+
+_h_ia = table.monthly_p[State.SUBMITTED][State.IA_SIGNED]
+_h_wd_s = table.monthly_p[State.SUBMITTED][State.WITHDRAWN]
+_h_op = table.monthly_p[State.IA_SIGNED][State.OPERATIONAL]
+_h_wd_i = table.monthly_p[State.IA_SIGNED][State.WITHDRAWN]
+
+# Grid share comes from the CTMC's long-run absorption probability — that one
+# is naturally self-consistent under the simulator.
+baseline_grid_share_pct = (
+    (_h_ia / (_h_ia + _h_wd_s)) * (_h_op / (_h_op + _h_wd_i))
+) * 100
 
 
-for key, default in (("study_pct", 0), ("withdrawal_strict_pct", 0), ("build_pct", 0)):
+def _study_mult_for_years(yrs: float) -> float:
+    """Speed ratio: faster slider (lower years) → higher multiplier on h_ia."""
+    return max(0.1, min(5.0, baseline_approval_yrs / max(yrs, 0.1)))
+
+
+def _build_mult_for_years(yrs: float) -> float:
+    return max(0.1, min(5.0, baseline_construction_yrs / max(yrs, 0.1)))
+
+
+def _strict_mult_for_share(share_pct: float) -> float:
+    """Find strict multiplier m such that the CTMC's long-run grid share = share_pct%."""
+    target = share_pct / 100.0
+
+    def share(m: float) -> float:
+        return (_h_ia / (_h_ia + m * _h_wd_s)) * (_h_op / (_h_op + m * _h_wd_i))
+
+    lo, hi = 0.01, 100.0
+    if share(lo) <= target:
+        return lo
+    if share(hi) >= target:
+        return hi
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if share(mid) > target:
+            lo = mid
+        else:
+            hi = mid
+    return (lo + hi) / 2
+
+
+def _years_at_study_mult(m: float) -> float:
+    return baseline_approval_yrs / m
+
+
+def _years_at_build_mult(m: float) -> float:
+    return baseline_construction_yrs / m
+
+
+def _share_at_strict_mult(m: float) -> float:
+    return ((_h_ia / (_h_ia + m * _h_wd_s)) * (_h_op / (_h_op + m * _h_wd_i))) * 100
+
+
+def _apply_preset(s_mult: float, strict_mult: float, b_mult: float) -> None:
+    st.session_state.approval_yrs = round(_years_at_study_mult(s_mult), 1)
+    st.session_state.grid_share_pct = int(round(_share_at_strict_mult(strict_mult)))
+    st.session_state.construction_yrs = round(_years_at_build_mult(b_mult), 1)
+
+
+for key, default in (
+    ("approval_yrs", round(baseline_approval_yrs, 1)),
+    ("grid_share_pct", int(round(baseline_grid_share_pct))),
+    ("construction_yrs", round(baseline_construction_yrs, 1)),
+):
     if key not in st.session_state:
         st.session_state[key] = default
 
@@ -508,96 +557,84 @@ st.markdown("##### Try a named scenario, or drag the levers yourself")
 p1, p2, p3, p4, p5 = st.columns(5)
 if p1.button("Status quo", use_container_width=True,
              help="Everything at today's pace — extrapolates the last decade forward."):
-    _apply_preset(0, 0, 0)
+    _apply_preset(1.0, 1.0, 1.0)
     st.rerun()
 if p2.button("Reform delivers", use_container_width=True,
              help="FERC Order 2023's cluster-study reform works: approvals 50% faster, "
                   "30% more speculative projects culled."):
-    _apply_preset(50, 30, 0)
+    _apply_preset(1.5, 1.3, 1.0)
     st.rerun()
 if p3.button("Construction crunch", use_container_width=True,
              help="Supply chain, transformer shortage, and labor squeeze projects "
                   "downstream of approval; construction 40% slower, developers hold "
                   "positions instead of dropping out (20% less culling)."):
-    _apply_preset(0, -20, -40)
+    _apply_preset(1.0, 0.8, 0.6)
     st.rerun()
 if p4.button("Reform stalls", use_container_width=True,
              help="Order 2023 doesn't deliver: approvals 20% slower, withdrawal incentives "
                   "10% weaker, construction roughly flat."):
-    _apply_preset(-20, -10, 0)
+    _apply_preset(0.8, 0.9, 1.0)
     st.rerun()
 if p5.button("All systems go", use_container_width=True,
              help="Best case 2030: approvals 60% faster, 30% more aggressive culling, "
                   "construction 40% faster as supply chain heals."):
-    _apply_preset(60, 30, 40)
+    _apply_preset(1.6, 1.3, 1.4)
     st.rerun()
 
 st.markdown(" ")
 
-# Convert percent-change inputs into multipliers used by the simulator
-study_speed = 1 + st.session_state.study_pct / 100
-withdrawal_strict = 1 + st.session_state.withdrawal_strict_pct / 100
-build_speed = 1 + st.session_state.build_pct / 100
-
-base_read = _hazard_readout(table, 1.0, 1.0, 1.0)
-sc_read = _hazard_readout(table, study_speed, withdrawal_strict, build_speed)
-
 lv1, lv2, lv3, lv_reset = st.columns([3, 3, 3, 1])
 
 with lv1:
-    study_pct = st.slider(
-        "How fast can RTOs approve a new project?",
-        -50, 100, key="study_pct", step=10, format="%+d%%",
-        help="0% = today's pace. The cluster-study process (feasibility, system "
-             "impact, facilities) is the regulatory bottleneck most reformers "
-             "target. +50% is roughly what FERC Order 2023 was designed to achieve.",
+    approval_yrs = st.slider(
+        "Years from queue entry to approval",
+        0.5, 8.0, key="approval_yrs", step=0.1, format="%.1f yrs",
+        help=f"Today: {baseline_approval_yrs:.1f} yrs (median for projects that "
+             "actually advanced). The cluster-study process (feasibility, system "
+             "impact, facilities) is the regulatory bottleneck most reformers target. "
+             "FERC Order 2023 was designed to push this number down.",
     )
-    st.markdown(
-        f"<small>Avg time from queue entry to approval: "
-        f"<b>{base_read['sub_years']:.1f} yrs</b> today → "
-        f"<b style='color:#3ec47e'>{sc_read['sub_years']:.1f} yrs</b> scenario</small>",
-        unsafe_allow_html=True,
-    )
+    st.caption(f"Today: **{baseline_approval_yrs:.1f} yrs**")
 
 with lv2:
-    withdrawal_strict_pct = st.slider(
-        "How aggressively are speculative projects culled?",
-        -50, 100, key="withdrawal_strict_pct", step=10, format="%+d%%",
-        help="0% = today's pace. Stricter financial milestones (deposits, ready-by "
-             "deadlines) force speculative projects to drop out faster. +50% simulates "
-             "queue-reform intent — more withdrawals near-term, cleaner queue long-term. "
-             "−30% means looser regime — projects park indefinitely.",
+    grid_share_pct = st.slider(
+        "Share of new projects that ever reach the grid",
+        5, 80, key="grid_share_pct", step=1, format="%d%%",
+        help=f"Today: ~{baseline_grid_share_pct:.0f}% (long-run, if current hazards "
+             "hold). Higher = looser withdrawal regime (projects park indefinitely). "
+             "Lower = stricter financial milestones cull speculative projects, leaving "
+             "a cleaner queue.",
     )
-    st.markdown(
-        f"<small>Share of new projects that ever reach the grid: "
-        f"<b>{base_read['overall_op_pct']:.0f}%</b> today → "
-        f"<b style='color:#3ec47e'>{sc_read['overall_op_pct']:.0f}%</b> scenario</small>",
-        unsafe_allow_html=True,
-    )
+    st.caption(f"Today: **{baseline_grid_share_pct:.0f}%**")
 
 with lv3:
-    build_pct = st.slider(
-        "How fast does construction actually finish?",
-        -50, 100, key="build_pct", step=10, format="%+d%%",
-        help="0% = today's pace. Once a project has an interconnection agreement, can "
-             "it actually get built? Captures transformer lead times, IRA tax-credit "
-             "certainty, labor, and local permitting. −40% simulates the 2022–24 "
-             "transformer shortage; +40% simulates a healed supply chain.",
+    construction_yrs = st.slider(
+        "Years from approval to operating",
+        0.5, 8.0, key="construction_yrs", step=0.1, format="%.1f yrs",
+        help=f"Today: {baseline_construction_yrs:.1f} yrs (median for projects that "
+             "actually completed). Captures transformer lead times, IRA tax-credit "
+             "certainty, labor, and local permitting.",
     )
-    st.markdown(
-        f"<small>Avg time from approval to operating: "
-        f"<b>{base_read['ia_years']:.1f} yrs</b> today → "
-        f"<b style='color:#3ec47e'>{sc_read['ia_years']:.1f} yrs</b> scenario</small>",
-        unsafe_allow_html=True,
-    )
+    st.caption(f"Today: **{baseline_construction_yrs:.1f} yrs**")
 
 with lv_reset:
     st.markdown("&nbsp;")
-    if st.button("↺ Reset", help="Return all levers to today's pace (0%)."):
-        _apply_preset(0, 0, 0)
+    if st.button("↺ Reset", help="Return all levers to today's values."):
+        _apply_preset(1.0, 1.0, 1.0)
         st.rerun()
 
-is_scenario = not (study_pct == 0 and withdrawal_strict_pct == 0 and build_pct == 0)
+# Convert slider targets back to the multipliers the simulator consumes.
+# Each slider's value is its "all else equal" effect; the combined Monte Carlo
+# applies all three multipliers together — what you see in the chart below.
+study_speed = _study_mult_for_years(approval_yrs)
+withdrawal_strict = _strict_mult_for_share(grid_share_pct)
+build_speed = _build_mult_for_years(construction_yrs)
+
+is_scenario = (
+    abs(approval_yrs - baseline_approval_yrs) > 0.05
+    or abs(grid_share_pct - baseline_grid_share_pct) > 0.5
+    or abs(construction_yrs - baseline_construction_yrs) > 0.05
+)
 scenario_sim = (
     _scenario(df, study_speed, withdrawal_strict, build_speed) if is_scenario else None
 )
