@@ -1004,10 +1004,13 @@ st.markdown(
 
 st.info(
     "**Where this ties to Tapestry.** The data problem isn't just the simulation above — "
-    "it's that the cluster-study process, FERC Order 2023's full text, PJM's cycle-by-cycle "
-    "tariff filings, and individual project upgrade-cost reports all live in fragmented "
-    "PDFs that no operator can query at once. The companion repo "
-    "(`ferc-pjm-rag`, in progress) is the document-understanding side of the same problem."
+    "the cluster-study process, FERC Order 2023's full text, PJM's tariff filings, and "
+    "individual project upgrade-cost reports all live in fragmented PDFs that no operator "
+    "can query at once. The companion repo "
+    "[`ferc-pjm-rag`](https://github.com/keanuhea/ferc-pjm-rag) is the document-understanding "
+    "side of the same problem — a RAG pipeline over the regulatory corpus with inline "
+    "citations to source PDF and page. Structured-data simulation + unstructured-document "
+    "understanding, two angles on the operator data problem Tapestry is solving."
 )
 
 st.divider()
