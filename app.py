@@ -22,6 +22,7 @@ from src.forward_sim import simulate
 from src.load_data import COLUMN_MAP, QUEUE_SHEET, find_data_file, load_queued_up
 from src.pjm_queue import list_snapshots, load_snapshot
 from src.pjm_scoring import score_pjm_active
+from src.scenario_brief import BriefInputs, generate_brief
 from src.state_machine import (
     ACTIVE_STATES,
     CANONICAL_TRANSITIONS,
@@ -781,6 +782,57 @@ fig = px.area(
 fig.update_layout(height=380)
 st.plotly_chart(fig, use_container_width=True)
 
+# ── Claude-generated executive brief of the current scenario ─────────────────
+if is_scenario and scenario_sim is not None:
+    sc_year_idx = next(
+        (i for i, m in enumerate(scenario_sim.months) if m.year == 2030),
+        len(scenario_sim.months) // 2,
+    )
+    sc_op_2030 = float(scenario_sim.state_at_horizon(sc_year_idx).loc["operational", "mean"])
+    sc_gw_2030 = float(scenario_sim.operational_gw_quantiles((0.5,)).iloc[sc_year_idx, 0])
+    b_op_2030 = float(sim.state_at_horizon(sc_year_idx).loc["operational", "mean"])
+    b_gw_2030 = float(sim.operational_gw_quantiles((0.5,)).iloc[sc_year_idx, 0])
+
+    @st.cache_data(show_spinner="Writing the brief...")
+    def _cached_brief(
+        sc_approval, sc_construction, sc_share,
+        study, strict, build,
+        base_op, base_gw, sc_op, sc_gw,
+    ):
+        return generate_brief(BriefInputs(
+            base_approval_yrs=baseline_approval_yrs,
+            base_construction_yrs=baseline_construction_yrs,
+            base_share_pct=baseline_grid_share_pct,
+            sc_approval_yrs=sc_approval,
+            sc_construction_yrs=sc_construction,
+            sc_share_pct=sc_share,
+            study_mult=study, strict_mult=strict, build_mult=build,
+            base_op_2030=base_op, base_gw_2030=base_gw,
+            sc_op_2030=sc_op, sc_gw_2030=sc_gw,
+        ))
+
+    brief_col, _ = st.columns([1, 4])
+    with brief_col:
+        run_brief = st.button(
+            "✨ Brief this scenario",
+            help="Have Claude write a 3-bullet executive read of what your scenario means.",
+            use_container_width=True,
+        )
+
+    if run_brief:
+        try:
+            brief = _cached_brief(
+                approval_yrs, construction_yrs, grid_share_pct,
+                study_speed, withdrawal_strict, build_speed,
+                b_op_2030, b_gw_2030, sc_op_2030, sc_gw_2030,
+            )
+            st.success(brief)
+        except RuntimeError as e:
+            st.warning(f"{e} The simulation works without it — but for the AI brief you'll "
+                       "need an Anthropic API key.")
+        except Exception as e:
+            st.error(f"Brief generation failed: {e}")
+
 with st.expander("📐 How the simulation is fit (methodology)", expanded=False):
     st.markdown(
         "**Model.** Continuous-time Markov chain over four states "
@@ -858,6 +910,96 @@ if "resource_type" in df.columns and "queue_date" in df.columns and "mw" in df.c
         labels={"year": "Queue entry year", "GW": "GW entering queue", "resource_type": "Resource"},
     )
     st.plotly_chart(fig, use_container_width=True)
+
+st.divider()
+
+# ───── Section 5: The path forward ────────────────────────────────────────────
+# A single named "realistic resolution" scenario — what plausible reform actually
+# does, not the optimistic best case. Cluster study reform partially delivers,
+# financial milestones tighten modestly, supply chain holds steady.
+REALISTIC_STUDY_MULT = 1.45     # approval 2.2 → ~1.5 yrs
+REALISTIC_STRICT_MULT = 1.20    # share 21% → ~17%
+REALISTIC_BUILD_MULT = 1.00     # construction unchanged — supply chain genuinely hard
+
+realistic_sim = _scenario(
+    df, REALISTIC_STUDY_MULT, REALISTIC_STRICT_MULT, REALISTIC_BUILD_MULT
+)
+
+# Operational GW at the 4-year mark (2030) — most policy-relevant horizon
+year_2030_idx = next(
+    (i for i, m in enumerate(realistic_sim.months) if m.year == 2030),
+    len(realistic_sim.months) // 2,
+)
+realistic_gw_2030 = float(realistic_sim.operational_gw_quantiles((0.5,)).iloc[year_2030_idx, 0])
+baseline_gw_2030 = float(sim.operational_gw_quantiles((0.5,)).iloc[year_2030_idx, 0])
+realistic_op_2030 = float(realistic_sim.state_at_horizon(year_2030_idx).loc["operational", "mean"])
+baseline_op_2030 = float(sim.state_at_horizon(year_2030_idx).loc["operational", "mean"])
+
+delta_gw = realistic_gw_2030 - baseline_gw_2030
+delta_op = realistic_op_2030 - baseline_op_2030
+
+st.header("The path forward: realistic reform clears an extra " + f"{delta_gw:,.0f} GW by 2030")
+st.markdown(
+    f"The interactive panel above shows what's *possible*. This is what's **plausible** — "
+    f"cluster-study reform partially delivers, financial milestones tighten modestly, "
+    f"supply chain holds steady at today's pace. Under this scenario, **{delta_op:+,.0f} more "
+    f"projects** reach commercial operation by 2030 versus extrapolating today's hazards forward."
+)
+
+pf1, pf2, pf3 = st.columns(3)
+pf1.metric(
+    "Approval time falls",
+    f"{baseline_approval_yrs / REALISTIC_STUDY_MULT:.1f} yrs",
+    f"−{baseline_approval_yrs - baseline_approval_yrs / REALISTIC_STUDY_MULT:.1f} yrs",
+    delta_color="inverse",
+    help="Median time from queue entry to interconnection-agreement signature.",
+)
+pf2.metric(
+    "Speculative load gets culled",
+    f"{_share_at_strict_mult(REALISTIC_STRICT_MULT):.0f}% reach grid",
+    f"{_share_at_strict_mult(REALISTIC_STRICT_MULT) - baseline_grid_share_pct:+.0f} pp",
+    delta_color="inverse",
+    help="Long-run share of new entrants that ever reach operating. Drops because stricter "
+         "financial milestones force speculative projects out of the queue earlier.",
+)
+pf3.metric(
+    "Construction holds steady",
+    f"{baseline_construction_yrs:.1f} yrs",
+    "no change",
+    delta_color="off",
+    help="Transformer supply, labor, and local permitting are genuinely hard — this scenario "
+         "assumes they don't dramatically improve.",
+)
+
+st.markdown(" ")
+st.markdown("##### What it actually takes")
+st.markdown(
+    """
+1. **FERC Order 2023 finishes deploying.** The reformed cluster-study process is law,
+   but RTOs are mid-transition (PJM's Cycle 1 began Apr 28, 2026; validation through Jul 27).
+   Cutting approval times from 2.2 to 1.5 years is what the rule was designed to deliver —
+   this scenario assumes ~70% of that target lands in practice.
+
+2. **Withdrawal milestones get teeth.** Ready-by deadlines and at-risk deposits force
+   speculative projects to drop out earlier instead of squatting on POI capacity. The
+   share of new entries reaching the grid actually *falls* — but the queue runs cleaner,
+   so the projects that stay are real, and they advance faster.
+
+3. **Supply chain stops getting worse.** This is the binding constraint past 2028:
+   transformer lead times, qualified labor, and local permitting. The scenario doesn't
+   assume these improve — only that they don't deteriorate further. Construction stays
+   at ~2 years. **This is where the next leg of reform has to happen** if the U.S. wants
+   to add another 200+ GW of generation by 2030.
+"""
+)
+
+st.info(
+    "**Where this ties to Tapestry.** The data problem isn't just the simulation above — "
+    "it's that the cluster-study process, FERC Order 2023's full text, PJM's cycle-by-cycle "
+    "tariff filings, and individual project upgrade-cost reports all live in fragmented "
+    "PDFs that no operator can query at once. The companion repo "
+    "(`ferc-pjm-rag`, in progress) is the document-understanding side of the same problem."
+)
 
 st.divider()
 st.caption(
