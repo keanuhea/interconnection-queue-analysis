@@ -641,54 +641,64 @@ scenario_sim = (
 )
 
 # ── Claude-generated executive brief — lives right under the sliders ─────────
-if is_scenario and scenario_sim is not None:
-    sc_year_idx = next(
-        (i for i, m in enumerate(scenario_sim.months) if m.year == 2030),
-        len(scenario_sim.months) // 2,
+brief_target_sim = scenario_sim if scenario_sim is not None else sim
+sc_year_idx = next(
+    (i for i, m in enumerate(brief_target_sim.months) if m.year == 2030),
+    len(brief_target_sim.months) // 2,
+)
+sc_op_2030 = float(brief_target_sim.state_at_horizon(sc_year_idx).loc["operational", "mean"])
+sc_gw_2030 = float(brief_target_sim.operational_gw_quantiles((0.5,)).iloc[sc_year_idx, 0])
+b_op_2030 = float(sim.state_at_horizon(sc_year_idx).loc["operational", "mean"])
+b_gw_2030 = float(sim.operational_gw_quantiles((0.5,)).iloc[sc_year_idx, 0])
+
+
+@st.cache_data(show_spinner="Writing the brief...")
+def _cached_brief(
+    sc_approval, sc_construction, sc_share,
+    study, strict, build,
+    base_op, base_gw, sc_op, sc_gw,
+    n_cohort_, initial_gw_, is_baseline_,
+):
+    return generate_brief(BriefInputs(
+        base_approval_yrs=baseline_approval_yrs,
+        base_construction_yrs=baseline_construction_yrs,
+        base_share_pct=baseline_grid_share_pct,
+        sc_approval_yrs=sc_approval,
+        sc_construction_yrs=sc_construction,
+        sc_share_pct=sc_share,
+        study_mult=study, strict_mult=strict, build_mult=build,
+        base_op_2030=base_op, base_gw_2030=base_gw,
+        sc_op_2030=sc_op, sc_gw_2030=sc_gw,
+        n_cohort=n_cohort_, initial_gw=initial_gw_, is_baseline=is_baseline_,
+    ))
+
+
+brief_col, _ = st.columns([1, 4])
+with brief_col:
+    button_label = "✨ Brief this scenario" if is_scenario else "✨ Brief the baseline"
+    button_help = (
+        "Have Claude write a 3-bullet executive read of what your scenario means."
+        if is_scenario
+        else "Have Claude write a 3-bullet executive read of the baseline projection — "
+             "what happens if today's pace continues unchanged."
     )
-    sc_op_2030 = float(scenario_sim.state_at_horizon(sc_year_idx).loc["operational", "mean"])
-    sc_gw_2030 = float(scenario_sim.operational_gw_quantiles((0.5,)).iloc[sc_year_idx, 0])
-    b_op_2030 = float(sim.state_at_horizon(sc_year_idx).loc["operational", "mean"])
-    b_gw_2030 = float(sim.operational_gw_quantiles((0.5,)).iloc[sc_year_idx, 0])
-
-    @st.cache_data(show_spinner="Writing the brief...")
-    def _cached_brief(
-        sc_approval, sc_construction, sc_share,
-        study, strict, build,
-        base_op, base_gw, sc_op, sc_gw,
-    ):
-        return generate_brief(BriefInputs(
-            base_approval_yrs=baseline_approval_yrs,
-            base_construction_yrs=baseline_construction_yrs,
-            base_share_pct=baseline_grid_share_pct,
-            sc_approval_yrs=sc_approval,
-            sc_construction_yrs=sc_construction,
-            sc_share_pct=sc_share,
-            study_mult=study, strict_mult=strict, build_mult=build,
-            base_op_2030=base_op, base_gw_2030=base_gw,
-            sc_op_2030=sc_op, sc_gw_2030=sc_gw,
-        ))
-
-    brief_col, _ = st.columns([1, 4])
-    with brief_col:
-        run_brief = st.button(
-            "✨ Brief this scenario",
-            help="Have Claude write a 3-bullet executive read of what your scenario means.",
-            use_container_width=True,
+    run_brief = st.button(
+        button_label, help=button_help, use_container_width=True,
+    )
+if run_brief:
+    try:
+        brief = _cached_brief(
+            approval_yrs, construction_yrs, grid_share_pct,
+            study_speed, withdrawal_strict, build_speed,
+            b_op_2030, b_gw_2030, sc_op_2030, sc_gw_2030,
+            n_cohort, initial_gw, not is_scenario,
         )
-    if run_brief:
-        try:
-            brief = _cached_brief(
-                approval_yrs, construction_yrs, grid_share_pct,
-                study_speed, withdrawal_strict, build_speed,
-                b_op_2030, b_gw_2030, sc_op_2030, sc_gw_2030,
-            )
-            st.success(brief)
-        except RuntimeError as e:
-            st.warning(f"{e} The simulation works without it — but for the AI brief you'll "
-                       "need an Anthropic API key.")
-        except Exception as e:
-            st.error(f"Brief generation failed: {e}")
+        st.success(brief)
+    except RuntimeError as e:
+        st.warning(f"{e} The simulation works without it — but for the AI brief you'll "
+                   "need an Anthropic API key.")
+    except Exception as e:
+        st.error(f"Brief generation failed: {e}")
 
 # Scenario aggregates for delta display
 if scenario_sim is not None:
