@@ -4,6 +4,8 @@ Two views of the U.S. grid interconnection queue stitched together: the historic
 
 Built as a portfolio piece exploring the same data problem Tapestry (Alphabet) is solving for grid operators.
 
+> **Looking for the combined experience?** This dashboard and its document-corpus companion ([`ferc-pjm-rag`](https://github.com/keanuhea/ferc-pjm-rag)) are stitched into one front door at [`interconnection-tools`](https://github.com/keanuhea/interconnection-tools) — single cover page, two navigable dashboards. This repo is the operator simulator standalone; keep it as the decomposed view if you want to inspect just this half.
+
 ## What you see
 
 A Streamlit dashboard organized as an executive narrative:
