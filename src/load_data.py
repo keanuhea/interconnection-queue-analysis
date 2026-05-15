@@ -31,7 +31,7 @@ COLUMN_MAP = {
     "poi_name": "poi",
     "project_name": "project_name",
     "type_clean": "resource_type",
-    "mw_1": "mw",
+    "mw1": "mw",
     "county": "county",
     "state": "state",
     "service": "service",
