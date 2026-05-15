@@ -123,9 +123,9 @@ median_active_wait = active["queue_age_years"].median()
 # ───── Headline ───────────────────────────────────────────────────────────────
 st.title("The U.S. grid is stuck waiting in line")
 st.markdown(
-    f"**{len(active):,} projects** representing **{total_active_gw:,.0f} GW** of new "
-    "generation capacity are currently waiting in U.S. interconnection queues — "
-    "roughly **1.6× the entire installed capacity of the U.S. grid today**. "
+    f"**{len(active):,} projects** are currently waiting in U.S. interconnection queues. "
+    f"Their combined nameplate capacity — **{total_active_gw:,.0f} GW** — is "
+    "**roughly 1.6× the capacity of the entire installed U.S. grid**. "
     f"Of projects that have already resolved, only **{completion_rate_resolved:.0%}** "
     "ever reach commercial operation."
 )
